@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamForge — Architecture</title>
+<script>
+  (function () {
+    const saved = localStorage.getItem('theme');
+    const dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.classList.toggle('dark', dark);
+  })();
+</script>
+<style>
+  :root {
+    --bg: #FAF9F5; --surface: #FFFFFF; --surface2: #F0EEE6;
+    --ink: #141413; --body: #3D3D3A; --muted: #87867F;
+    --line: #D1CFC5; --line-soft: #E6E3DA;
+    --clay: #D97757; --clay-soft: rgba(217,119,87,0.10);
+    --olive: #788C5D; --olive-soft: rgba(120,140,93,0.12);
+    --gold: #C9A45C; --blue: #5B7E96;
+    --zone: rgba(20,20,19,0.025); --zone-line: #D1CFC5;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  html.dark {
+    --bg: #141413; --surface: #1F1F1D; --surface2: #2A2A28;
+    --ink: #FAF9F5; --body: #D1CFC5; --muted: #87867F;
+    --line: #3D3D3A; --line-soft: #2A2A28;
+    --clay: #E48A6E; --clay-soft: rgba(228,138,110,0.14);
+    --olive: #9DB07C; --olive-soft: rgba(157,176,124,0.16);
+    --gold: #D4B36F; --blue: #7FA3BC;
+    --zone: rgba(250,249,245,0.03); --zone-line: #3D3D3A;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--body); font-family: var(--sans);
+    -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  .bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid var(--line-soft); flex: none;
+  }
+  .bar h1 { font-family: var(--serif); font-weight: 500; font-size: 18px; color: var(--ink); letter-spacing: -0.01em; }
+  .bar .sub { font-family: var(--mono); font-size: 10px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+  .spacer { flex: 1; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; max-width: 78%; }
+  .chip {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.03em;
+    padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+    background: transparent; color: var(--muted); cursor: pointer; transition: all .15s ease; white-space: nowrap;
+  }
+  .chip:hover { color: var(--ink); border-color: var(--muted); }
+  .chip.on { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+  #themeToggle {
+    font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 4px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  #themeToggle:hover { color: var(--ink); border-color: var(--muted); }
+
+  .stage { flex: 1; position: relative; min-height: 0; }
+  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .zone rect { fill: var(--zone); stroke: var(--zone-line); stroke-width: 1; stroke-dasharray: 5 5; rx: 16; }
+  .zone .ztitle { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; fill: var(--muted); }
+
+  .node { cursor: pointer; }
+  .node rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; rx: 10; transition: stroke .15s ease, filter .15s ease; }
+  .node:hover rect { stroke: var(--muted); }
+  .node.sel rect { stroke: var(--clay) !important; stroke-width: 2; }
+  .node .t  { font-family: var(--sans); font-size: 13.5px; font-weight: 600; fill: var(--ink); pointer-events: none; }
+  .node .m  { font-family: var(--mono); font-size: 10px; fill: var(--muted); pointer-events: none; }
+  .node .k  { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; fill: var(--clay); pointer-events: none; }
+  .node.gate rect { fill: var(--clay-soft); stroke: var(--clay); }
+  .node.store rect { fill: var(--surface2); }
+  .node.do rect { fill: var(--olive-soft); stroke: var(--olive); }
+  .node.ext rect { stroke-dasharray: 6 3; }
+
+  .edge { stroke: var(--muted); stroke-width: 1.6; fill: none; marker-end: url(#a-mut); transition: opacity .2s ease, stroke .2s ease; }
+  .edge.dash { stroke-dasharray: 5 4; }
+  .elbl { font-family: var(--mono); font-size: 10px; fill: var(--muted); transition: opacity .2s ease; }
+
+  .stage.flowing .edge { opacity: 0.13; }
+  .stage.flowing .elbl { opacity: 0.13; }
+  .stage.flowing .node { opacity: 0.30; }
+  .stage.flowing .zone { opacity: 0.45; }
+  .stage.flowing .edge.lit {
+    opacity: 1; stroke: var(--clay); marker-end: url(#a-clay);
+    stroke-dasharray: 7 5; animation: march 0.9s linear infinite;
+  }
+  .stage.flowing .elbl.lit { opacity: 1; fill: var(--clay); }
+  .stage.flowing .node.lit { opacity: 1; }
+  .stage.flowing .node.lit rect { stroke: var(--clay); }
+  @keyframes march { to { stroke-dashoffset: -12; } }
+  @media (prefers-reduced-motion: reduce) { .stage.flowing .edge.lit { animation: none; } }
+
+  .card {
+    position: absolute; max-width: 340px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; box-shadow: 0 6px 24px rgba(0,0,0,0.08);
+  }
+  #detail { right: 16px; bottom: 16px; width: 320px; }
+  #detail h3 { font-family: var(--serif); font-weight: 500; font-size: 16px; color: var(--ink); margin-bottom: 2px; }
+  #detail .meta { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 8px; }
+  #detail p { font-size: 12.5px; line-height: 1.5; }
+  #detail code { font-family: var(--mono); background: var(--surface2); padding: 1px 4px; border-radius: 4px; font-size: 11.5px; }
+
+  #flowcap { left: 16px; bottom: 16px; width: 300px; display: none; }
+  #flowcap.show { display: block; }
+  .fname { font-family: var(--serif); font-size: 15px; color: var(--ink); margin-bottom: 6px; }
+  #f-steps { list-style: none; counter-reset: step; }
+  #f-steps li { counter-increment: step; font-size: 12px; line-height: 1.45; margin-bottom: 5px; padding-left: 18px; position: relative; }
+  #f-steps li::before { content: counter(step); position: absolute; left: 0; top: 0; font-family: var(--mono); font-size: 10px; color: var(--clay); font-weight: 700; }
+
+  #bench { left: 16px; top: 14px; width: 240px; }
+  #bench .bt { font-family: var(--serif); font-size: 14px; color: var(--ink); margin-bottom: 8px; }
+  #bench .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #bench .lbl { font-family: var(--mono); font-size: 9.5px; color: var(--muted); width: 60px; flex: none; }
+  #bench .bar-bg { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  #bench .bar-fg { height: 100%; background: var(--clay); border-radius: 3px; }
+  #bench .val { font-family: var(--mono); font-size: 9.5px; color: var(--ink); width: 52px; flex: none; text-align: right; }
+
+  .src { position: absolute; left: 16px; top: 108px; font-family: var(--mono); font-size: 9px; color: var(--muted); opacity: 0.6; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>StreamForge</h1>
+  <span class="sub">event ingestion &amp; stream processing · phase map</span>
+  <div class="spacer"></div>
+  <div class="chips">
+    <button class="chip on" data-flow="all">All</button>
+    <button class="chip" data-flow="p1">1 · Engine</button>
+    <button class="chip" data-flow="p2">2 · Backpressure</button>
+    <button class="chip" data-flow="p3">3 · Parallelism</button>
+    <button class="chip" data-flow="p4">4 · Partitioning</button>
+    <button class="chip" data-flow="p5">5 · WAL</button>
+    <button class="chip" data-flow="p6">6 · Recovery</button>
+    <button class="chip" data-flow="p7">7 · Analytics</button>
+    <button class="chip" data-flow="p8">8 · Storage</button>
+    <button class="chip" data-flow="p9">9 · Prod / Lab</button>
+  </div>
+  <button id="themeToggle">Dark</button>
+</div>
+
+<div class="stage" id="stage">
+<svg viewBox="0 0 1620 900" preserveAspectRatio="xMidYMid meet">
+  <defs>
+    <marker id="a-mut" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="var(--muted)"/></marker>
+    <marker id="a-clay" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="var(--clay)"/></marker>
+  </defs>
+
+  <!-- zones -->
+  <g class="zone"><rect x="20" y="370" width="150" height="160"/><text class="ztitle" x="34" y="394">Clients</text></g>
+  <g class="zone"><rect x="210" y="250" width="200" height="400"/><text class="ztitle" x="224" y="274">Ingestion</text></g>
+  <g class="zone"><rect x="450" y="250" width="200" height="400"/><text class="ztitle" x="464" y="274">Durable Log</text></g>
+  <g class="zone"><rect x="690" y="370" width="150" height="160"/><text class="ztitle" x="704" y="394">Router</text></g>
+  <g class="zone"><rect x="880" y="80" width="220" height="740"/><text class="ztitle" x="894" y="104">Workers</text></g>
+  <g class="zone"><rect x="1140" y="370" width="180" height="160"/><text class="ztitle" x="1154" y="394">Processing</text></g>
+  <g class="zone"><rect x="1360" y="80" width="220" height="740"/><text class="ztitle" x="1374" y="104">Storage</text></g>
+
+  <!-- edges -->
+  <path id="e1" class="edge" d="M170,450 C195,450 195,335 230,335"/>
+  <path id="e2" class="edge" d="M310,380 L310,480"/>
+  <path id="e3" class="edge" d="M390,525 C430,525 430,335 470,335"/>
+  <path id="e4" class="edge" d="M630,335 C670,335 670,450 705,450"/>
+  <path id="e14" class="edge dash" d="M550,380 L550,480"/>
+  <path id="e5" class="edge" d="M825,450 C862,450 862,185 900,185"/>
+  <path id="e6" class="edge" d="M825,450 C862,450 862,445 900,445"/>
+  <path id="e7" class="edge" d="M825,450 C862,450 862,705 900,705"/>
+  <path id="e8" class="edge" d="M1080,185 C1122,185 1122,440 1155,440"/>
+  <path id="e9" class="edge" d="M1080,445 C1120,445 1122,450 1155,450"/>
+  <path id="e10" class="edge" d="M1080,705 C1122,705 1122,460 1155,460"/>
+  <path id="e11" class="edge" d="M1305,425 C1342,425 1342,185 1380,185"/>
+  <path id="e12" class="edge" d="M1305,450 C1342,450 1342,445 1380,445"/>
+  <path id="e13" class="edge" d="M1305,475 C1342,475 1342,705 1380,705"/>
+  <path id="e16" class="edge dash" d="M310,335 C310,700 800,700 800,800"/>
+  <path id="e17" class="edge dash" d="M990,445 C990,690 850,690 850,800"/>
+  <path id="e18" class="edge dash" d="M1230,450 C1230,690 900,690 900,800"/>
+
+  <text class="elbl" data-e="e2" x="322" y="435">bounded chan</text>
+  <text class="elbl" data-e="e3" x="440" y="428">append + fsync</text>
+  <text class="elbl" data-e="e14" x="558" y="435">checkpoint / replay</text>
+  <text class="elbl" data-e="e4" x="655" y="400">hash(user_id)%N</text>
+  <text class="elbl" data-e="e11,e12,e13" x="1345" y="330">serialize</text>
+
+  <!-- nodes -->
+  <g class="node" data-k="clients"><rect x="30" y="405" width="130" height="90"/><text class="k" x="44" y="424">SOURCE</text><text class="t" x="44" y="444">Event Clients</text><text class="m" x="44" y="462">HTTP / WebSocket</text></g>
+
+  <g class="node gate" data-k="gateway"><rect x="230" y="290" width="160" height="90"/><text class="k" x="244" y="309">RUST · TOKIO</text><text class="t" x="244" y="329">Ingestion Gateway</text><text class="m" x="244" y="347">accept, batch, validate</text></g>
+  <g class="node" data-k="queue"><rect x="230" y="480" width="160" height="90"/><text class="k" x="244" y="499">CHANNEL</text><text class="t" x="244" y="519">Bounded Queue</text><text class="m" x="244" y="537">backpressure · shed load</text></g>
+
+  <g class="node do" data-k="wal"><rect x="470" y="290" width="160" height="90"/><text class="k" x="484" y="309">SEGMENTS</text><text class="t" x="484" y="329">Append Log (WAL)</text><text class="m" x="484" y="347">offsets · checksums</text></g>
+  <g class="node" data-k="recovery"><rect x="470" y="480" width="160" height="90"/><text class="k" x="484" y="499">RECOVERY</text><text class="t" x="484" y="519">Crash Recovery</text><text class="m" x="484" y="537">replay from checkpoint</text></g>
+
+  <g class="node gate" data-k="partitioner"><rect x="705" y="400" width="120" height="100"/><text class="k" x="719" y="422">ROUTER</text><text class="t" x="719" y="442">Partitioner</text><text class="m" x="719" y="460">ordering per key</text></g>
+
+  <g class="node" data-k="worker1"><rect x="900" y="140" width="180" height="90"/><text class="k" x="914" y="159">SHARD 0</text><text class="t" x="914" y="179">Worker 1</text><text class="m" x="914" y="197">Tokio task / Rayon</text></g>
+  <g class="node" data-k="worker2"><rect x="900" y="400" width="180" height="90"/><text class="k" x="914" y="419">SHARD 1</text><text class="t" x="914" y="439">Worker 2</text><text class="m" x="914" y="457">Tokio task / Rayon</text></g>
+  <g class="node" data-k="worker3"><rect x="900" y="660" width="180" height="90"/><text class="k" x="914" y="679">SHARD N</text><text class="t" x="914" y="699">Worker N</text><text class="m" x="914" y="717">Tokio task / Rayon</text></g>
+
+  <g class="node gate" data-k="aggregator"><rect x="1155" y="400" width="150" height="100"/><text class="k" x="1169" y="422">STREAM</text><text class="t" x="1169" y="442">Windowing +</text><text class="t" x="1169" y="459">Dedup</text></g>
+
+  <g class="node store" data-k="postgres"><rect x="1380" y="140" width="180" height="90"/><text class="k" x="1394" y="159">OLTP</text><text class="t" x="1394" y="179">PostgreSQL</text><text class="m" x="1394" y="197">point lookups, state</text></g>
+  <g class="node store" data-k="parquet"><rect x="1380" y="400" width="180" height="90"/><text class="k" x="1394" y="419">COLUMNAR</text><text class="t" x="1394" y="439">Parquet</text><text class="m" x="1394" y="457">analytics store</text></g>
+  <g class="node store" data-k="redis"><rect x="1380" y="660" width="180" height="90"/><text class="k" x="1394" y="679">CACHE</text><text class="t" x="1394" y="699">Redis</text><text class="m" x="1394" y="717">hot lookups</text></g>
+
+  <g class="node ext" data-k="observability"><rect x="690" y="800" width="220" height="70"/><text class="k" x="704" y="820">CROSS-CUTTING</text><text class="t" x="704" y="840">Prometheus · Grafana · OTel</text></g>
+</svg>
+
+  <div class="src">plan · docs/streamforge-phases.md</div>
+
+  <div class="card" id="bench">
+    <div class="bt">Perf Lab (Phase 9)</div>
+    <div class="row"><span class="lbl">Throughput</span><div class="bar-bg"><div class="bar-fg" style="width:78%"></div></div><span class="val">182k/s</span></div>
+    <div class="row"><span class="lbl">P99</span><div class="bar-bg"><div class="bar-fg" style="width:35%"></div></div><span class="val">18ms</span></div>
+    <div class="row"><span class="lbl">Memory</span><div class="bar-bg"><div class="bar-fg" style="width:41%"></div></div><span class="val">412MB</span></div>
+    <div class="row"><span class="lbl">Queue</span><div class="bar-bg"><div class="bar-fg" style="width:22%"></div></div><span class="val">1,284</span></div>
+  </div>
+
+  <div class="card" id="flowcap">
+    <div class="fname" id="f-name"></div>
+    <ol id="f-steps"></ol>
+  </div>
+
+  <div class="card" id="detail">
+    <h3 id="d-title">Click anything</h3>
+    <div class="meta" id="d-meta">node detail</div>
+    <p id="d-body">Every box is clickable. The phase chips up top light up which part of the pipeline that phase of the build exercises.</p>
+  </div>
+</div>
+<script>
+const DETAIL = {
+  clients:      { t:"Event Clients", m:"producer · HTTP / WS", b:"Synthetic or real producers pushing events in at configurable rates — this is what you throttle up from 1k → 100k+ events/s to find where the system bends." },
+  gateway:      { t:"Ingestion Gateway", m:"Rust · Tokio · async", b:"Accepts connections, validates payloads, and batches events before handing them to the queue. Where you learn <code>async/await</code>, connection pools, and structured logging." },
+  queue:        { t:"Bounded Queue", m:"mpsc channel · backpressure", b:"A fixed-capacity channel between producer and consumer. Fill it deliberately with a slow downstream to force backpressure, load shedding, and adaptive batching — the single most valuable concept here." },
+  wal:          { t:"Append Log (WAL)", m:"segments · fsync · offsets", b:"A simplified Kafka-style append-only log you build yourself: segment rotation, sequential disk writes, offsets, and checksums. This is where the project stops being 'a Rust project' and becomes systems engineering." },
+  recovery:     { t:"Crash Recovery", m:"checkpoint · replay", b:"Kill the process mid-processing and recover: read the WAL, find the last committed offset, replay, resume. Forces you to make processing idempotent." },
+  partitioner:  { t:"Partitioner", m:"hash(user_id) % N", b:"Routes events to shards so the same key always lands on the same partition, giving per-key ordering while partitions process concurrently — the core idea behind horizontal scalability." },
+  worker1:      { t:"Worker (shard 0)", m:"Tokio task / Rayon / OS thread", b:"One of N parallel workers. Swap between Tokio tasks, OS threads, and Rayon to feel the difference between IO-bound and CPU-bound workloads, and where async stops helping." },
+  worker2:      { t:"Worker (shard 1)", m:"Tokio task / Rayon / OS thread", b:"Same role as the other workers — processes only the partitions routed to it, so contention and ordering stay local to a shard." },
+  worker3:      { t:"Worker (shard N)", m:"Tokio task / Rayon / OS thread", b:"Add more of these to push throughput and watch where you hit diminishing returns — lock contention, scheduler overhead, or memory bandwidth." },
+  aggregator:   { t:"Windowing + Dedup", m:"tumbling / sliding windows", b:"Streaming aggregations (count, sum, percentiles) over tumbling and sliding windows, plus dedup for at-least-once delivery. This is your miniature stream-processing engine." },
+  postgres:     { t:"PostgreSQL", m:"OLTP · durable state", b:"Durable point-lookup storage — checkpoints, offsets, and any state that needs transactional guarantees rather than columnar scan speed." },
+  parquet:      { t:"Parquet", m:"columnar · analytics", b:"Where raw JSON events end up after you benchmark JSON → MessagePack → Protobuf → Parquet for storage size, serialization speed, and scan performance." },
+  redis:        { t:"Redis", m:"cache · hot lookups", b:"Caches expensive repeated lookups so the hot path doesn't hit Postgres or Parquet for every read." },
+  observability:{ t:"Observability", m:"Prometheus · Grafana · OTel", b:"Cross-cutting: every stage emits metrics and traces so the benchmark dashboard has real numbers to show, and so regressions are visible instead of guessed at." },
+};
+
+const FLOWS = {
+  p1: { name:"Phase 1 — Fast single-node engine", edges:["e1","e2","e8"], nodes:["clients","gateway","queue","worker1","aggregator"],
+    steps:["HTTP → Tokio async runtime accepts and validates events","Bounded channel hands events to a worker pool","Batch processor writes to Postgres — benchmark 1k → 10k → 100k events/s"] },
+  p2: { name:"Phase 2 — Backpressure", edges:["e2","e3"], nodes:["gateway","queue","wal"],
+    steps:["Deliberately slow the downstream so the queue fills","Implement bounded queues, producer throttling, load shedding","Add adaptive batching that reacts to queue depth"] },
+  p3: { name:"Phase 3 — Parallel processing", edges:["e4","e5","e6","e7","e8","e9","e10"], nodes:["wal","partitioner","worker1","worker2","worker3","aggregator"],
+    steps:["Split single-worker processing across N workers","Compare Tokio tasks vs OS threads vs Rayon","Benchmark CPU-bound vs IO-bound workloads to find where async stops helping"] },
+  p4: { name:"Phase 4 — Partitioning", edges:["e4","e5","e6","e7"], nodes:["wal","partitioner","worker1","worker2","worker3"],
+    steps:["Route events by hash(user_id) % N","Guarantee same user → same partition","Process partitions concurrently without losing per-key ordering"] },
+  p5: { name:"Phase 5 — Persistent log", edges:["e3","e14"], nodes:["queue","wal","recovery"],
+    steps:["Build a simplified append-only log with segment files","Sequential disk writes, fsync, offsets","Add checksums and corruption detection"] },
+  p6: { name:"Phase 6 — Crash recovery", edges:["e14","e4"], nodes:["wal","recovery","partitioner"],
+    steps:["Kill the process mid-processing","Read the WAL and find the last committed offset","Replay events and resume — this is where idempotency pays off"] },
+  p7: { name:"Phase 7 — Real-time analytics", edges:["e8","e9","e10"], nodes:["worker1","worker2","worker3","aggregator"],
+    steps:["Add streaming aggregations: count, sum, avg, percentiles","Implement tumbling and sliding windows","Handle event-time vs processing-time and late/watermarked events"] },
+  p8: { name:"Phase 8 — Storage optimization", edges:["e11","e12","e13"], nodes:["aggregator","postgres","parquet","redis"],
+    steps:["Benchmark JSON → MessagePack → Protobuf → Parquet","Compare storage size, (de)serialization speed, CPU and memory","Route hot lookups to Redis, durable state to Postgres, analytics to Parquet"] },
+  p9: { name:"Phase 9 — Production infra + perf lab", edges:["e16","e17","e18"], nodes:["gateway","worker2","aggregator","observability"],
+    steps:["Wire Prometheus, Grafana, and OpenTelemetry through every stage","Add health checks, graceful shutdown, retries, circuit breakers","Build the benchmark dashboard: throughput, P99, memory, queue depth, live-tunable knobs"] },
+};
+
+const stage = document.getElementById('stage');
+const nodes = document.querySelectorAll('.node');
+const edges = document.querySelectorAll('.edge');
+const elbls = document.querySelectorAll('.elbl');
+const chips = document.querySelectorAll('.chip');
+const fcap = document.getElementById('flowcap');
+
+function setFlow(key) {
+  chips.forEach(c => c.classList.toggle('on', c.dataset.flow === key));
+  edges.forEach(e => e.classList.remove('lit'));
+  elbls.forEach(l => l.classList.remove('lit'));
+  nodes.forEach(n => n.classList.remove('lit'));
+  if (key === 'all') { stage.classList.remove('flowing'); fcap.classList.remove('show'); return; }
+  const f = FLOWS[key];
+  stage.classList.add('flowing');
+  f.edges.forEach(id => document.getElementById(id)?.classList.add('lit'));
+  elbls.forEach(l => { if ((l.dataset.e||"").split(",").some(id => f.edges.includes(id))) l.classList.add('lit'); });
+  f.nodes.forEach(k => document.querySelector(`.node[data-k="${k}"]`)?.classList.add('lit'));
+  document.getElementById('f-name').textContent = f.name;
+  document.getElementById('f-steps').innerHTML = f.steps.map(s => `<li>${s}</li>`).join('');
+  fcap.classList.add('show');
+}
+chips.forEach(c => c.addEventListener('click', () => setFlow(c.dataset.flow)));
+
+nodes.forEach(n => n.addEventListener('click', () => {
+  nodes.forEach(x => x.classList.remove('sel'));
+  n.classList.add('sel');
+  const d = DETAIL[n.dataset.k];
+  if (!d) return;
+  document.getElementById('d-title').textContent = d.t;
+  document.getElementById('d-meta').textContent = d.m;
+  document.getElementById('d-body').innerHTML = d.b;
+}));
+
+document.getElementById('themeToggle').addEventListener('click', () => {
+  const dark = !document.documentElement.classList.contains('dark');
+  document.documentElement.classList.toggle('dark', dark);
+  localStorage.setItem('theme', dark ? 'dark' : 'light');
+});
+</script>
+</body>
+</html>
