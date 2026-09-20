@@ -1,1 +1,5 @@
 /target
+# Added by code-review-graph
+.code-review-graph/
+# Regenerable knowledge-graph cache (rebuild with `graphify update .`)
+graphify-out/
