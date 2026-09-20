@@ -107,3 +107,34 @@ cargo run --release -- bench --rate 182000 --duration 300 --assert-slo --dashboa
 - Benchmarks in §4 wired into `just bench` / CI on PRs touching gateway, WAL, partitioner, workers, or sinks.
 - A 10%+ throughput or P99 regression on the canonical 182k/s run blocks merge until explained or fixed.
 - New numbers append to `docs/performance-results.md` (created in Phase 9) — tables are append-only history, never edited in place.
+
+---
+
+## P1 — Phase 1 Results (in-memory sink, single batch worker)
+
+### Environment
+
+| Field | Value |
+|---|---|
+| CPU | AMD Ryzen 5 3600 6-Core Processor (12 logical cores, SMT) |
+| Rust | rustc 1.98.0 (88d9e12ae 2026-08-18) |
+| OS | Linux kernel 7.2.3-arch1-3 |
+| Build profile | `release` (`opt-level=3`, `lto="fat"`, `codegen-units=1`) |
+| Sink | `InMemorySink` (Arc<Mutex<Vec<Event>>>) |
+| `queue_capacity` | 8192 |
+| `batch.max_size` | 256 |
+| `batch.timeout` | 100 ms |
+| Loadgen concurrency | 2 tasks @ 1k · 8 tasks @ 10k · 16 tasks @ 100k |
+| Run duration | 30 s each |
+
+### Latency vs Rate (P1 row)
+
+| Target rate | Actual throughput | P50 latency | P99 latency | Accepted | Rejected | Errors |
+|---|---|---|---|---|---|---|
+| 1,000 events/s | **1,000 events/s** | 78.9 µs | 142 µs | 30,000 | 0 | 0 |
+| 10,000 events/s | **9,999 events/s** | 105.8 µs | 242 µs | 299,992 | 0 | 0 |
+| 100,000 events/s | **81,618 events/s** | 169.0 µs | 512 µs | 2,448,539 | 0 | 0 |
+
+### Saturation Knee
+
+At 1k and 10k events/s the pipeline delivers every event with zero rejection and P99 comfortably under 1 ms. The saturation knee appears between 10k and 100k: when the load generator targets 100k events/s with 16 concurrent HTTP tasks, the system sustains only ~81.6k events/s (~82% of target) — a throughput cap imposed by the **loadgen's HTTP client concurrency**, not the server. The server itself showed zero rejections and zero channel backpressure at all three rates, indicating the `InMemorySink` and bounded channel are not the bottleneck at this scale; the limit is outbound HTTP connection throughput from the single-host load generator. P99 rose from 242 µs at 10k to 512 µs at 100k (still 35× below the 18 ms SLO), confirming the server is absorbing the offered load gracefully with no tail-latency blowup. The true server saturation point is above 81.6k events/s and will be characterised in Phase 2 using a multi-connection load generator with explicit backpressure injection.

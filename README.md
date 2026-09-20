@@ -36,6 +36,10 @@ Most "stream processing" tutorials stop at a toy. StreamForge is a learning vehi
 | [docs/architecture.md](docs/architecture.md) | High-level and low-level diagrams, data flow, component specs, failure modes |
 | [docs/adr.md](docs/adr.md) | Architecture decision records with reasoning (language, runtime, WAL, partitioning, storage, serialization) |
 | [docs/phases.md](docs/phases.md) | The 9-phase build plan: scope, deliverables, exit criteria per phase |
+| [docs/phase-01-plan.md](docs/phase-01-plan.md) | Phase 1 plan: module map, decisions, task checklist |
+| [docs/roadmap.md](docs/roadmap.md) | Remaining work: status, detailed P1-finish–P9 plans, folder evolution |
+| [docs/phase-02-plan.md](docs/phase-02-plan.md) | Phase 2 plan: backpressure, shedding, adaptive batching |
+| [docs/coding-standards.md](docs/coding-standards.md) | Project-wide Rust practices (rust-skills rule IDs) |
 | [docs/performance.md](docs/performance.md) | SLOs, benchmark methodology, phase targets, profiling toolkit |
 | [docs/streamforge-architecture.html](docs/streamforge-architecture.html) | Interactive clickable architecture map with phase overlays |
 
