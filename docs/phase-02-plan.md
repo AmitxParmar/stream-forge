@@ -40,7 +40,11 @@ Data flow unchanged from P1: `gateway --Event--> mpsc(cap) --batch--> worker
    "rejected" from "accepted" (FR-4); a bare dropped connection is a protocol bug.
 3. **Adaptive batching keyed on queue depth.** Depth is already the overload canary
    (performance.md §6: P99 degrades past ~70% capacity); batch policy reads the same
-   signal instead of inventing a new one.
+   signal instead of inventing a new one. Shallow queue → small batches (low per-event
+   latency); deep queue → grow toward `max_size` (amortize per-flush cost and drain
+   faster). Measured result in `performance-results.md` §P2: the effect shows in the
+ transient (`batch_last` ramps 6→256 in Run C); steady state converges to max batch
+   under sustained overload.
 4. **Metrics via `tracing` now, Prometheus in P9.** Avoids a second observability
    migration; `metrics.rs` owns the handle so the exporter swap is localised.
    (`obs-library-facade`.)
@@ -54,13 +58,13 @@ exporter + dashboards (P9).
 
 ## 4. Task checklist
 
-- [ ] `src/metrics.rs`: depth gauge, accepted/rejected counters, batch histogram
-- [ ] Gateway: `try_send` fast path + timeout fallback → 429 + `Retry-After` + JSON
-- [ ] Pipeline: adaptive batch sizing keyed on queue depth (bounded min/max)
-- [ ] Loadgen: `--slow-sink 2x` injection + `--report queue-depth.csv`
-- [ ] `tests/backpressure.rs`: shed semantics, bounded memory, batch bounds
-- [ ] 2x-overload drill; trace + counts + P99-accepted appended to results
-- [ ] `cargo fmt --check`, `cargo clippy`, `cargo test` green
+- [x] Metrics handles: depth, accepted/rejected counters, batch-last (landed in `src/telemetry.rs` — metrics live with telemetry per AGENTS.md, not a separate `metrics.rs`)
+- [x] Gateway: 50ms `send` deadline → 429 + `Retry-After` + JSON reason (see `performance-results.md` P2: natural backpressure absorbs until slot-release > admission window)
+- [x] Pipeline: adaptive batch sizing keyed on queue depth (`effective_batch_size`, floor max/8, grows under backlog)
+- [x] Loadgen: metrics poll + `--depth-csv` series; slow-sink injection lives server-side as `--sink-delay-ms` (fault injection stays out of the load binary)
+- [x] `tests/backpressure.rs`: 429+Retry-After at the router seam, metrics counter contract
+- [x] 2x-class overload drill (A/B/C); trace + counts + P99-accepted in `docs/performance-results.md`
+- [x] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` green
 
 ## 5. Next steps (in order)
 

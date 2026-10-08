@@ -28,6 +28,7 @@ pub use config::Config;
 pub use error::AppError;
 pub use event::{Event, EventId, UserId};
 pub use sink::Sink;
+pub use telemetry::Metrics;
 
 use anyhow::Context;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +55,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     });
 
     let (tx, rx) = pipeline::channel(&config);
+    let metrics = telemetry::Metrics::new();
 
     match config.database_url {
         Some(ref url) => {
@@ -61,12 +63,20 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 .await
                 .context("failed to connect to postgres")?;
             info!("using postgres sink");
-            run_with_sink(config, tx, rx, pg_sink, shutdown).await
+            let pg_sink = sink::SlowSink::new(
+                pg_sink,
+                std::time::Duration::from_millis(config.sink_delay_ms),
+            );
+            run_with_sink(config, tx, rx, pg_sink, shutdown, metrics).await
         }
         None => {
             let mem_sink = sink::InMemorySink::default();
             info!("using in-memory sink");
-            run_with_sink(config, tx, rx, mem_sink, shutdown).await
+            let mem_sink = sink::SlowSink::new(
+                mem_sink,
+                std::time::Duration::from_millis(config.sink_delay_ms),
+            );
+            run_with_sink(config, tx, rx, mem_sink, shutdown, metrics).await
         }
     }
 }
@@ -78,10 +88,17 @@ async fn run_with_sink<S: sink::Sink>(
     rx: tokio::sync::mpsc::Receiver<Event>,
     sink: S,
     shutdown: CancellationToken,
+    metrics: telemetry::Metrics,
 ) -> anyhow::Result<()> {
-    let worker = pipeline::spawn_worker(rx, sink, config.batch.clone(), shutdown.clone());
+    let worker = pipeline::spawn_worker(
+        rx,
+        sink,
+        config.batch.clone(),
+        shutdown.clone(),
+        metrics.clone(),
+    );
 
-    gateway::serve(config.clone(), tx, shutdown.clone())
+    gateway::serve(config.clone(), tx, shutdown.clone(), metrics)
         .await
         .context("gateway failed")?;
 

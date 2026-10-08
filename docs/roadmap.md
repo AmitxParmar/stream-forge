@@ -15,14 +15,14 @@ Phase 1 scaffold is implemented and green (`fmt --check`, `clippy` zero warnings
 
 | # | Item | Status | Blocks |
 |---|---|---|---|
-| P1-a | Commit Phase 1 scaffold (code + `coding-standards.md` + `phase-01-plan.md`) | Open | Clean baseline for all later work |
-| P1-b | `PostgresSink: Sink` impl via `sqlx` | Open | Phase 1 "writes to Postgres"; P6 checkpoints need Postgres |
-| P1-c | `src/bin/loadgen.rs` + 1k/10k/100k rate curve | Open | Phase 1 exit criteria; grows into the P2–P9 bench harness |
+| P1-a | Commit Phase 1 scaffold | **Done** in `6b8031e` | — |
+| P1-b | `PostgresSink: Sink` impl via `sqlx` | **Done** (`sink.rs`, natively idempotent multi-row insert, opt-in via `--database-url`); live-DB test deferred until a local Postgres exists (P6 checkpoint work should pull in `infra/docker-compose.yml`) | — |
+| P1-c | Load generator + 1k/10k/100k rate curve | **Mostly done** (`src/bin/loadgen.rs`: HTTP driver w/ percentiles + metrics poll); the "knee" paragraph still open, and the `--skew` flag is reserved for P4, direct-pipeline bench reserved for P5 | Phase 1 exit |
 
-**Decision (recommended, adopted):** Postgres lands now with `infra/docker-compose.yml`
-for local dev; `loadgen.rs` grows into the canonical `bench` binary from
-`performance.md` §4 rather than adopting `criterion` (criterion suits micro-benches;
-we need a system load driver).
+**Decision (adopted, partially revised):** Postgres integration test deferred to
+P6; drill/QA runs use `InMemorySink` + server-side `--sink-delay-ms` fault
+injection. `loadgen` is HTTP-only (no direct-pipeline mode — that lands with the
+WAL/fsync ladder in P5, where a server in the path would distort numbers).
 
 ---
 
@@ -169,7 +169,9 @@ first justified folder split.
 P1 now:     src/{main,lib,config,error,event,gateway,pipeline,sink,telemetry}.rs
             tests/ingest.rs
 P1 finish:  + src/bin/loadgen.rs + infra/docker-compose.yml
-P2:         + src/metrics.rs
+P2:         + Gateway 429/Retry-After + adaptive batching (in-place) +
+            telemetry::Metrics + tests/backpressure.rs   (done; see
+            performance-results.md)
 P3:         + src/worker.rs              (split from pipeline.rs)
 P4:         + src/partition.rs
 P5:         + src/wal/{mod,segment,reader,record,fsync}.rs

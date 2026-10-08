@@ -22,6 +22,8 @@ pub struct BatchConfig {
     pub max_size: usize,
     /// Flush a partial batch after this long.
     pub timeout: Duration,
+    /// Resize batches from queue depth instead of always using `max_size`.
+    pub adaptive: bool,
 }
 
 impl Default for BatchConfig {
@@ -29,6 +31,7 @@ impl Default for BatchConfig {
         Self {
             max_size: 256,
             timeout: Duration::from_millis(100),
+            adaptive: true,
         }
     }
 }
@@ -61,6 +64,23 @@ pub fn channel(config: &crate::Config) -> (mpsc::Sender<Event>, mpsc::Receiver<E
     mpsc::channel(config.queue_capacity)
 }
 
+/// Effective flush threshold for this batch.
+///
+/// A shallow queue means no backlog: flush small batches quickly to keep
+/// per-event latency low. A deep queue means we are behind: grow the batch
+/// to amortize per-flush cost (fsync, serialization, dispatch) and drain faster.
+/// Always within `[max_size / 8, max_size]`, never below 1.
+#[must_use]
+pub fn effective_batch_size(max_size: usize, depth: usize, capacity: usize) -> usize {
+    if capacity == 0 || max_size == 0 {
+        return 1;
+    }
+    let floor = (max_size / 8).max(1);
+    let headroom = max_size.saturating_sub(floor);
+    let used = depth.min(capacity);
+    floor + headroom.saturating_mul(used) / capacity
+}
+
 /// Spawn the single Phase 1 batch worker.
 ///
 /// The worker accumulates events until [`BatchConfig::max_size`] or
@@ -71,38 +91,54 @@ pub fn spawn_worker<S>(
     sink: S,
     batch: BatchConfig,
     shutdown: CancellationToken,
+    metrics: crate::telemetry::Metrics,
 ) -> JoinHandle<Result<(), AppError>>
 where
     S: Sink,
 {
+    let capacity = rx.max_capacity();
     tokio::spawn(async move {
         let mut pending: Vec<Event> = Vec::with_capacity(batch.max_size);
         loop {
+            let effective = if batch.adaptive {
+                effective_batch_size(batch.max_size, rx.len(), capacity)
+            } else {
+                batch.max_size
+            };
+            metrics.set_depth(rx.len());
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     info!(pending = pending.len(), "worker shutting down, flushing remainder");
+                    let n = pending.len();
                     flush(&sink, &mut pending).await?;
+                    metrics.set_batch_last(n);
+                    metrics.set_depth(0);
                     return Ok(());
                 }
                 received = rx.recv() => {
                     let Some(event) = received else {
                         info!(pending = pending.len(), "channel closed, flushing remainder");
                         flush(&sink, &mut pending).await?;
+                        metrics.set_depth(0);
                         return Ok(());
                     };
                     pending.push(event);
-                    if pending.len() >= batch.max_size {
+                    if pending.len() >= effective {
+                        let n = pending.len();
                         flush(&sink, &mut pending).await?;
+                        metrics.set_batch_last(n);
                         continue;
                     }
                     // Wait briefly for more events before flushing a partial batch.
-                    if tokio::time::timeout(batch.timeout, drain(&mut rx, &mut pending, batch.max_size))
+                    if tokio::time::timeout(batch.timeout, drain(&mut rx, &mut pending, effective))
                         .await
                         .is_err()
                     {
                         warn!(pending = pending.len(), "batch timeout elapsed, flushing partial batch");
                     }
+                    let n = pending.len();
                     flush(&sink, &mut pending).await?;
+                    metrics.set_batch_last(n);
                 }
             }
         }
@@ -151,8 +187,10 @@ mod tests {
             BatchConfig {
                 max_size: 256,
                 timeout: Duration::from_millis(10),
+                adaptive: false,
             },
             shutdown,
+            crate::telemetry::Metrics::new(),
         );
 
         // Act
@@ -169,5 +207,21 @@ mod tests {
         // Assert
         handle.await.unwrap().unwrap();
         assert_eq!(sink.len().await, 1);
+    }
+
+    #[test]
+    fn adaptive_batch_grows_with_backlog() {
+        let shallow = effective_batch_size(256, 0, 1024);
+        let mid = effective_batch_size(256, 512, 1024);
+        let deep = effective_batch_size(256, 1024, 1024);
+        assert!(shallow < mid, "shallow={shallow} mid={mid}");
+        assert!(mid < deep, "mid={mid} deep={deep}");
+        assert_eq!(deep, 256);
+        assert_eq!(shallow, 32);
+    }
+
+    #[test]
+    fn adaptive_batch_never_exceeds_floor() {
+        assert!(effective_batch_size(8, usize::MAX, 16) >= 1);
     }
 }

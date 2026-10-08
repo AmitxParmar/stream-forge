@@ -32,6 +32,18 @@ struct Args {
     /// Maximum connections in the Postgres pool.
     #[arg(long, env = "STREAMFORGE_POOL_SIZE", default_value_t = 5)]
     pool_size: u32,
+
+    /// Per-flush artificial sink delay in ms (Phase 2 fault injection).
+    #[arg(long, env = "STREAMFORGE_SINK_DELAY_MS", default_value_t = 0)]
+    sink_delay_ms: u64,
+
+    /// Disable adaptive batch sizing; always flush at `--batch-size`.
+    #[arg(
+        long,
+        env = "STREAMFORGE_NO_ADAPTIVE_BATCHING",
+        default_value_t = false
+    )]
+    no_adaptive_batching: bool,
 }
 
 #[tokio::main]
@@ -45,9 +57,11 @@ async fn main() -> anyhow::Result<()> {
         batch: streamforge::pipeline::BatchConfig {
             max_size: args.batch_size,
             timeout: std::time::Duration::from_millis(args.batch_timeout_ms),
+            adaptive: !args.no_adaptive_batching,
         },
         database_url: args.database_url,
         pool_size: args.pool_size,
+        sink_delay_ms: args.sink_delay_ms,
     };
 
     streamforge::run(config).await

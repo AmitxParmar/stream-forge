@@ -16,6 +16,8 @@ pub struct Config {
     pub database_url: Option<String>,
     /// Maximum number of connections in the Postgres pool.
     pub pool_size: u32,
+    /// Per-batch artificial delay injected into the sink (fault injection, Phase 2).
+    pub sink_delay_ms: u64,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             batch: BatchConfig::default(),
             database_url: None,
             pool_size: 5,
+            sink_delay_ms: 0,
         }
     }
 }

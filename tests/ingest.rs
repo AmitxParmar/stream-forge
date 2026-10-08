@@ -38,7 +38,13 @@ async fn worker_batches_events_to_sink() {
     let (tx, rx) = pipeline::channel(&config);
     let sink = InMemorySink::default();
     let shutdown = CancellationToken::new();
-    let handle = pipeline::spawn_worker(rx, sink.clone(), BatchConfig::default(), shutdown);
+    let handle = pipeline::spawn_worker(
+        rx,
+        sink.clone(),
+        BatchConfig::default(),
+        shutdown,
+        streamforge::Metrics::new(),
+    );
 
     // Act
     for id in 0..10 {

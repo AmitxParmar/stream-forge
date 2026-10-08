@@ -29,6 +29,14 @@ struct Args {
     /// Number of concurrent sender tasks.
     #[arg(long, default_value_t = 4)]
     concurrency: u64,
+
+    /// Base URL of the server's `/metrics` endpoint (optional).
+    #[arg(long)]
+    metrics_url: Option<String>,
+
+    /// CSV file path to append sampled metrics to (requires `--metrics-url`).
+    #[arg(long)]
+    depth_csv: Option<std::path::PathBuf>,
 }
 
 /// Shared counters across sender tasks.
@@ -67,6 +75,50 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
 
     let stats = Arc::new(Stats::new());
+
+    if let (Some(metrics_url), Some(depth_csv)) = (args.metrics_url.clone(), args.depth_csv.clone())
+    {
+        let sampler = client.clone();
+        tokio::spawn(async move {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&depth_csv)
+                .expect("open depth csv");
+            use std::io::Write;
+            writeln!(
+                file,
+                "t_ms,queue_depth,batch_last,accepted,rejected_full,rejected_invalid,uptime_ms"
+            )
+            .expect("write csv header");
+            let started = Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if started.elapsed() > Duration::from_secs(args.duration) + Duration::from_secs(5) {
+                    break;
+                }
+                match sampler.get(&metrics_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(m) = resp.json::<serde_json::Value>().await {
+                            let _ = writeln!(
+                                file,
+                                "{},{},{},{},{},{},{}",
+                                started.elapsed().as_millis(),
+                                m["queue_depth"].as_u64().unwrap_or(0),
+                                m["batch_last"].as_u64().unwrap_or(0),
+                                m["accepted"].as_u64().unwrap_or(0),
+                                m["rejected_full"].as_u64().unwrap_or(0),
+                                m["rejected_invalid"].as_u64().unwrap_or(0),
+                                m["uptime_ms"].as_u64().unwrap_or(0),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     let rate_per_task = args.rate / args.concurrency.max(1);
     let test_duration = Duration::from_secs(args.duration);
     let start = Instant::now();

@@ -50,6 +50,59 @@ impl Sink for InMemorySink {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn slow_sink_delays_each_flush() {
+        let sink = SlowSink::new(
+            InMemorySink::default(),
+            std::time::Duration::from_millis(40),
+        );
+        let batch = vec![
+            crate::event::Event::parse(crate::event::RawEvent {
+                event_id: 1,
+                user_id: 1,
+                kind: "click".to_owned(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap(),
+        ];
+        let started = std::time::Instant::now();
+        sink.write_batch(&batch).await.unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(40));
+        assert_eq!(sink.inner.len().await, 1);
+    }
+}
+
+/// Fault-injection wrapper that sleeps before every batch flush.
+///
+/// Phase 2 uses this to deliberately slow the downstream so the bounded
+/// channel fills; a `delay` of zero is a pass-through.
+#[derive(Debug, Clone)]
+pub struct SlowSink<S> {
+    inner: S,
+    delay: std::time::Duration,
+}
+
+impl<S> SlowSink<S> {
+    /// Wrap `sink` with a fixed per-flush delay.
+    #[must_use]
+    pub fn new(inner: S, delay: std::time::Duration) -> Self {
+        Self { inner, delay }
+    }
+}
+
+impl<S: Sink> Sink for SlowSink<S> {
+    async fn write_batch(&self, batch: &[Event]) -> Result<(), SinkError> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        self.inner.write_batch(batch).await
+    }
+}
+
 /// Postgres sink backed by a connection pool.
 ///
 /// Writes batches via multi-row `INSERT ... ON CONFLICT DO NOTHING` for
