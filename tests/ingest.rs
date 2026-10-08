@@ -32,16 +32,21 @@ async fn validated_event_travels_gateway_channel() {
 }
 
 #[tokio::test]
-async fn worker_batches_events_to_sink() {
+async fn workers_flush_events_to_sink() {
     // Arrange
     let config = Config::default();
     let (tx, rx) = pipeline::channel(&config);
     let sink = InMemorySink::default();
     let shutdown = CancellationToken::new();
-    let handle = pipeline::spawn_worker(
+    let group = streamforge::worker::spawn_workers(
         rx,
         sink.clone(),
-        BatchConfig::default(),
+        streamforge::worker::WorkerPlan {
+            batch: BatchConfig::default(),
+            model: streamforge::WorkerModel::Tokio,
+            count: 2,
+            workload: streamforge::workload::Workload::default(),
+        },
         shutdown,
         streamforge::Metrics::new(),
     );
@@ -53,7 +58,7 @@ async fn worker_batches_events_to_sink() {
     drop(tx);
 
     // Assert
-    handle.await.unwrap().unwrap();
+    group.wait().await.unwrap();
     assert_eq!(sink.len().await, 10);
 }
 

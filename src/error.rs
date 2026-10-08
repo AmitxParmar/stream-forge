@@ -28,6 +28,13 @@ pub enum AppError {
     #[error("pipeline channel full")]
     ChannelFull,
 
+    /// Worker task failed or its channel closed unexpectedly.
+    #[error("worker task failed: {reason}")]
+    WorkerFailed {
+        /// Human-readable reason the worker failed.
+        reason: String,
+    },
+
     /// Batch sink failed to persist events.
     #[error("sink write failed")]
     Sink(#[source] SinkError),

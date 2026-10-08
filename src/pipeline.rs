@@ -7,13 +7,9 @@
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
 
 use crate::error::AppError;
 use crate::event::Event;
-use crate::sink::Sink;
 
 /// Batching policy for the worker.
 #[derive(Debug, Clone)]
@@ -81,133 +77,9 @@ pub fn effective_batch_size(max_size: usize, depth: usize, capacity: usize) -> u
     floor + headroom.saturating_mul(used) / capacity
 }
 
-/// Spawn the single Phase 1 batch worker.
-///
-/// The worker accumulates events until [`BatchConfig::max_size`] or
-/// [`BatchConfig::timeout`], then flushes to `sink`. It exits when the
-/// shutdown token fires or all senders are dropped.
-pub fn spawn_worker<S>(
-    mut rx: mpsc::Receiver<Event>,
-    sink: S,
-    batch: BatchConfig,
-    shutdown: CancellationToken,
-    metrics: crate::telemetry::Metrics,
-) -> JoinHandle<Result<(), AppError>>
-where
-    S: Sink,
-{
-    let capacity = rx.max_capacity();
-    tokio::spawn(async move {
-        let mut pending: Vec<Event> = Vec::with_capacity(batch.max_size);
-        loop {
-            let effective = if batch.adaptive {
-                effective_batch_size(batch.max_size, rx.len(), capacity)
-            } else {
-                batch.max_size
-            };
-            metrics.set_depth(rx.len());
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    info!(pending = pending.len(), "worker shutting down, flushing remainder");
-                    let n = pending.len();
-                    flush(&sink, &mut pending).await?;
-                    metrics.set_batch_last(n);
-                    metrics.set_depth(0);
-                    return Ok(());
-                }
-                received = rx.recv() => {
-                    let Some(event) = received else {
-                        info!(pending = pending.len(), "channel closed, flushing remainder");
-                        flush(&sink, &mut pending).await?;
-                        metrics.set_depth(0);
-                        return Ok(());
-                    };
-                    pending.push(event);
-                    if pending.len() >= effective {
-                        let n = pending.len();
-                        flush(&sink, &mut pending).await?;
-                        metrics.set_batch_last(n);
-                        continue;
-                    }
-                    // Wait briefly for more events before flushing a partial batch.
-                    if tokio::time::timeout(batch.timeout, drain(&mut rx, &mut pending, effective))
-                        .await
-                        .is_err()
-                    {
-                        warn!(pending = pending.len(), "batch timeout elapsed, flushing partial batch");
-                    }
-                    let n = pending.len();
-                    flush(&sink, &mut pending).await?;
-                    metrics.set_batch_last(n);
-                }
-            }
-        }
-    })
-}
-
-/// Drain up to `limit` additional events without blocking past channel state.
-async fn drain(rx: &mut mpsc::Receiver<Event>, pending: &mut Vec<Event>, limit: usize) {
-    while pending.len() < limit {
-        match rx.try_recv() {
-            Ok(event) => pending.push(event),
-            Err(_) => break,
-        }
-    }
-}
-
-/// Flush the pending batch to the sink and reuse the allocation.
-#[instrument(skip(sink, pending), fields(batch_size = pending.len()))]
-async fn flush<S>(sink: &S, pending: &mut Vec<Event>) -> Result<(), AppError>
-where
-    S: Sink,
-{
-    if pending.is_empty() {
-        return Ok(());
-    }
-    sink.write_batch(pending).await.map_err(AppError::Sink)?;
-    info!(flushed = pending.len(), "batch flushed");
-    pending.clear();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::InMemorySink;
-
-    #[tokio::test]
-    async fn worker_flushes_on_channel_close() {
-        // Arrange
-        let (tx, rx) = mpsc::channel(16);
-        let sink = InMemorySink::default();
-        let shutdown = CancellationToken::new();
-        let handle = spawn_worker(
-            rx,
-            sink.clone(),
-            BatchConfig {
-                max_size: 256,
-                timeout: Duration::from_millis(10),
-                adaptive: false,
-            },
-            shutdown,
-            crate::telemetry::Metrics::new(),
-        );
-
-        // Act
-        let event = crate::event::Event::parse(crate::event::RawEvent {
-            event_id: 1,
-            user_id: 2,
-            kind: "click".to_owned(),
-            payload: serde_json::json!({}),
-        })
-        .unwrap();
-        tx.send(event).await.unwrap();
-        drop(tx);
-
-        // Assert
-        handle.await.unwrap().unwrap();
-        assert_eq!(sink.len().await, 1);
-    }
 
     #[test]
     fn adaptive_batch_grows_with_backlog() {

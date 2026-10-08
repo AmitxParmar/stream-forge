@@ -17,7 +17,7 @@ Phase 1 scaffold is implemented and green (`fmt --check`, `clippy` zero warnings
 |---|---|---|---|
 | P1-a | Commit Phase 1 scaffold | **Done** in `6b8031e` | — |
 | P1-b | `PostgresSink: Sink` impl via `sqlx` | **Done** (`sink.rs`, natively idempotent multi-row insert, opt-in via `--database-url`); live-DB test deferred until a local Postgres exists (P6 checkpoint work should pull in `infra/docker-compose.yml`) | — |
-| P1-c | Load generator + 1k/10k/100k rate curve | **Mostly done** (`src/bin/loadgen.rs`: HTTP driver w/ percentiles + metrics poll); the "knee" paragraph still open, and the `--skew` flag is reserved for P4, direct-pipeline bench reserved for P5 | Phase 1 exit |
+| P1-c | Load generator + 1k/10k/100k rate curve | **Done** (`src/bin/loadgen.rs` + knee ≈56k/s admission-bound in `performance-results.md`); `--skew` flag reserved for P4, direct-pipeline bench reserved for P5 | — |
 
 **Decision (adopted, partially revised):** Postgres integration test deferred to
 P6; drill/QA runs use `InMemorySink` + server-side `--sink-delay-ms` fault
@@ -59,7 +59,7 @@ Postgres, load generator, first throughput/latency curve.
 - **Exit:** zero unbounded growth at 2x overload; trace + paragraph appended to
   `performance-results.md` (PRD §6 backpressure row).
 
-## 4. Phase 3 — Parallel processing (FR-10, ADR-002; perf P3)
+## 4. Phase 3 — Parallel processing (FR-10, ADR-002; perf P3) — **DONE**
 
 **Goal:** feel the difference between Tokio tasks, OS threads, and Rayon.
 

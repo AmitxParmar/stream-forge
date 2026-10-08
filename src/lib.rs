@@ -23,12 +23,15 @@ pub mod gateway;
 pub mod pipeline;
 pub mod sink;
 pub mod telemetry;
+pub mod worker;
+pub mod workload;
 
 pub use config::Config;
 pub use error::AppError;
 pub use event::{Event, EventId, UserId};
 pub use sink::Sink;
 pub use telemetry::Metrics;
+pub use worker::WorkerModel;
 
 use anyhow::Context;
 use tokio_util::sync::CancellationToken;
@@ -90,23 +93,20 @@ async fn run_with_sink<S: sink::Sink>(
     shutdown: CancellationToken,
     metrics: telemetry::Metrics,
 ) -> anyhow::Result<()> {
-    let worker = pipeline::spawn_worker(
-        rx,
-        sink,
-        config.batch.clone(),
-        shutdown.clone(),
-        metrics.clone(),
-    );
+    let plan = worker::WorkerPlan {
+        batch: config.batch.clone(),
+        model: config.worker_model,
+        count: config.worker_count,
+        workload: workload::Workload::new(config.io_work_us, config.cpu_iters),
+    };
+    let workers = worker::spawn_workers(rx, sink, plan, shutdown.clone(), metrics.clone());
 
     gateway::serve(config.clone(), tx, shutdown.clone(), metrics)
         .await
         .context("gateway failed")?;
 
     shutdown.cancel();
-    worker
-        .await
-        .context("worker task panicked")?
-        .context("worker failed")?;
+    workers.wait().await.context("worker group failed")?;
     Ok(())
 }
 

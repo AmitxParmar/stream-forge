@@ -18,6 +18,14 @@ pub struct Config {
     pub pool_size: u32,
     /// Per-batch artificial delay injected into the sink (fault injection, Phase 2).
     pub sink_delay_ms: u64,
+    /// Number of parallel workers fed by round-robin (Phase 3).
+    pub worker_count: usize,
+    /// Execution model for the batch kernel (Phase 3).
+    pub worker_model: crate::worker::WorkerModel,
+    /// Simulated IO wait per event, microseconds (Phase 3 workload).
+    pub io_work_us: u64,
+    /// CPU iterations per event (Phase 3 workload).
+    pub cpu_iters: usize,
 }
 
 impl Default for Config {
@@ -29,6 +37,10 @@ impl Default for Config {
             database_url: None,
             pool_size: 5,
             sink_delay_ms: 0,
+            worker_count: 1,
+            worker_model: crate::worker::WorkerModel::default(),
+            io_work_us: 0,
+            cpu_iters: 0,
         }
     }
 }
@@ -46,6 +58,11 @@ impl Config {
             });
         }
         self.batch.validate()?;
+        if self.worker_count == 0 || self.worker_count > 64 {
+            return Err(AppError::Config {
+                reason: "worker_count must be between 1 and 64".to_owned(),
+            });
+        }
         Ok(())
     }
 }

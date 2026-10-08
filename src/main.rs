@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use clap::Parser;
+use std::str::FromStr;
 use streamforge::{Config, telemetry};
 
 /// StreamForge Phase 1: single-node in-memory ingestion engine.
@@ -44,12 +45,30 @@ struct Args {
         default_value_t = false
     )]
     no_adaptive_batching: bool,
+
+    /// Number of parallel workers (Phase 3).
+    #[arg(long, env = "STREAMFORGE_WORKERS", default_value_t = 1)]
+    workers: usize,
+
+    /// Worker execution model: tokio | threads | rayon (Phase 3).
+    #[arg(long, env = "STREAMFORGE_WORKER_MODEL", default_value = "tokio")]
+    worker_model: String,
+
+    /// Simulated IO wait per event in microseconds (Phase 3 workload).
+    #[arg(long, env = "STREAMFORGE_IO_US", default_value_t = 0)]
+    io_us: u64,
+
+    /// CPU iterations per event (Phase 3 workload).
+    #[arg(long, env = "STREAMFORGE_CPU_ITERS", default_value_t = 0)]
+    cpu_iters: usize,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     telemetry::init().context("failed to initialise telemetry")?;
+
+    let worker_model = streamforge::WorkerModel::from_str(&args.worker_model)?;
 
     let config = Config {
         bind: args.bind,
@@ -62,6 +81,10 @@ async fn main() -> anyhow::Result<()> {
         database_url: args.database_url,
         pool_size: args.pool_size,
         sink_delay_ms: args.sink_delay_ms,
+        worker_count: args.workers,
+        worker_model,
+        io_work_us: args.io_us,
+        cpu_iters: args.cpu_iters,
     };
 
     streamforge::run(config).await
