@@ -1,9 +1,10 @@
-//! Phase 3 workers: N parallel batch consumers fed by a round-robin distributor.
+//! Phase 4 sharded workers: N parallel batch consumers fed by a partitioner.
 //!
-//! The gateway's single bounded channel fans out to N per-worker channels; each
-//! worker keeps the adaptive batching loop from Phase 2 and dispatches the
-//! batch kernel to one of three execution models ([`WorkerModel`]). The model
-//! is what Phase 3 measures: where does async stop helping.
+//! The gateway's single bounded channel fans out to N per-shard channels via
+//! `hash(user_id) % N` ([`Partitioner`]); each worker exclusively owns one
+//! shard, so per-key ordering holds without cross-worker locks (ADR-004).
+//! Each worker keeps the adaptive batching loop from Phase 2 and dispatches
+//! the batch kernel to one of three execution models ([`WorkerModel`]).
 
 use std::str::FromStr;
 
@@ -15,6 +16,7 @@ use tracing::{info, instrument};
 
 use crate::error::AppError;
 use crate::event::Event;
+use crate::partitioner::Partitioner;
 use crate::pipeline::{BatchConfig, effective_batch_size};
 use crate::sink::Sink;
 use crate::telemetry::Metrics;
@@ -96,10 +98,11 @@ impl WorkerGroup {
     }
 }
 
-/// Spawn the distributor and `count` workers; `count` must be at least 1.
+/// Spawn the partitioner and `count` shard workers; `count` is at least 1.
 ///
-/// The distributor owns the gateway channel and round-robins events into
-/// per-worker channels so all events drain even when a worker stalls.
+/// The partitioner owns the gateway channel and routes each event to
+/// `hash(user_id) % count`, so one worker exclusively owns each shard and
+/// per-key order is preserved end to end (ADR-004).
 pub fn spawn_workers<S>(
     mut rx: mpsc::Receiver<Event>,
     sink: S,
@@ -116,32 +119,38 @@ where
     let (txs, rxs): (Vec<mpsc::Sender<Event>>, Vec<mpsc::Receiver<Event>>) =
         (0..count).map(|_| mpsc::channel(capacity)).unzip();
 
+    metrics.init_shards(count);
     let dist_shutdown = shutdown.clone();
     let dist_metrics = metrics.clone();
     let mut handles: Vec<JoinHandle<Result<(), AppError>>> = Vec::with_capacity(count + 1);
 
     handles.push(tokio::spawn(async move {
-        let mut next = 0usize;
+        let partitioner = Partitioner::new(count)?;
         loop {
             tokio::select! {
                 _ = dist_shutdown.cancelled() => {
-                    info!("distributor shutting down, closing worker channels");
+                    info!("partitioner shutting down, closing shard channels");
                     drop(txs);
                     return Ok(());
                 }
                 received = rx.recv() => {
                     let Some(event) = received else {
-                        info!("gateway channel closed, closing worker channels");
+                        info!("gateway channel closed, closing shard channels");
                         drop(txs);
                         return Ok(());
                     };
                     dist_metrics.set_depth(rx.len());
-                    if txs[next].send(event).await.is_err() {
+                    let shard = partitioner.route(&event);
+                    let tx = txs.get(shard).ok_or(AppError::RoutingError {
+                        index: shard,
+                        count,
+                    })?;
+                    dist_metrics.set_shard_depth(shard, tx.max_capacity().saturating_sub(tx.capacity()));
+                    if tx.send(event).await.is_err() {
                         return Err(AppError::WorkerFailed {
                             reason: "worker channel closed unexpectedly".to_owned(),
                         });
                     }
-                    next = (next + 1) % count;
                 }
             }
         }
@@ -183,7 +192,7 @@ where
         ..
     } = plan;
     let capacity = rx.max_capacity();
-    metrics.set_depth(rx.len());
+    metrics.set_shard_depth(id, rx.len());
     let mut pending: Vec<Event> = Vec::with_capacity(batch.max_size);
     loop {
         let effective = if batch.adaptive {
@@ -195,18 +204,18 @@ where
             _ = shutdown.cancelled() => {
                 info!(pending = pending.len(), "worker shutting down, flushing remainder");
                 flush(model, &workload, &sink, &mut pending, &metrics).await?;
-                metrics.set_depth(0);
+                metrics.set_shard_depth(id, 0);
                 return Ok(());
             }
             received = rx.recv() => {
                 let Some(event) = received else {
                     info!(pending = pending.len(), "worker channel closed, flushing remainder");
                     flush(model, &workload, &sink, &mut pending, &metrics).await?;
-                    metrics.set_depth(0);
+                    metrics.set_shard_depth(id, 0);
                     return Ok(());
                 };
                 pending.push(event);
-                metrics.set_depth(rx.len());
+                metrics.set_shard_depth(id, rx.len());
                 if pending.len() >= effective {
                     flush(model, &workload, &sink, &mut pending, &metrics).await?;
                     continue;

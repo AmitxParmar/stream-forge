@@ -40,6 +40,14 @@ impl InMemorySink {
     pub async fn is_empty(&self) -> bool {
         self.inner.lock().await.is_empty()
     }
+
+    /// Ordered snapshot of everything stored so far.
+    ///
+    /// Test-only helper for the Phase 4 ordering proof: per-shard appends
+    /// preserve arrival order, so each key's subsequence must be monotonic.
+    pub async fn snapshot(&self) -> Vec<Event> {
+        self.inner.lock().await.clone()
+    }
 }
 
 impl Sink for InMemorySink {

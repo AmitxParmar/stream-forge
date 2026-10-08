@@ -35,6 +35,18 @@ pub enum AppError {
         reason: String,
     },
 
+    /// Partitioner produced a shard index outside `[0, count)`.
+    ///
+    /// Defensive: `Partitioner::route` computes `hash % count` by
+    /// construction, so this fires only on a programming error.
+    #[error("routing error: shard index {index} out of range [0, {count})")]
+    RoutingError {
+        /// The offending shard index.
+        index: usize,
+        /// The shard count it was checked against.
+        count: usize,
+    },
+
     /// Batch sink failed to persist events.
     #[error("sink write failed")]
     Sink(#[source] SinkError),

@@ -165,3 +165,74 @@ Workloads: `io` = 500µs/event sleep (`--batch-size 32`, rate 1500/s);
 - [x] Benchmark matrix (18 runs) recorded above
 - [ ] Persist matrix to CI (regression policy: performance.md §7) — with Phase 9
 - [ ] Rayon intra-batch `par_iter` split — refinement after Phase 8 codec work
+
+---
+
+## Phase 4 — Partitioning: ordering proof + hot-shard drill (2026-10-08)
+
+Router: `hash(user_id) % 8`, hand-rolled Fx-inspired 64-bit mixer (no new
+crate — the plan's `rustc-hash` suggestion was declined per AGENTS.md §3).
+Server: `--workers 8 --queue-capacity 4096`, in-memory sink, 12-core host.
+Depth series: `--depth-csv` samples `GET /metrics` every 200ms, now with a
+`shard_depths` column (`|`-joined per-shard depths). Raw CSVs kept at
+`/tmp/p4-*.csv` during the drill.
+
+### Ordering proof
+
+`cargo test --test ordering`: 4 shards, 20 users × 500 sequenced events
+interleaved round-robin (10k events through the real `spawn_workers`
+distributor + `InMemorySink`). Every user's arrival subsequence carries
+strictly increasing event ids; all 10k events present, zero loss. Mechanism:
+one FIFO channel per shard with a single exclusive consumer, so same key can
+never interleave across workers. Plus `partitioner` unit tests: 10k users pin
+to one shard across instances; 80k sequential ids spread within ±20% of mean
+across 8 shards.
+
+### Throughput (uniform keys, no sink delay)
+
+| Requested | Concurrency | Achieved | Accepted/Rejected | P50 | P99 |
+|---|---|---|---|---|---|
+| 100k/s, 15s | 12 | 62,230/s | 933,457 / 0 | 173µs | 0.48ms |
+| 160k/s, 15s | 32 | 80,863/s | 1,212,969 / 0 | 311µs | 0.97ms |
+| 200k/s, 15s | 48 | 84,120/s | 1,261,829 / 0 | 358µs | 1.30ms |
+
+Ingress queue depth pinned at ~0 and `shard_depths` read all-zero
+throughout: the engine drains everything offered. The ceiling is the
+*generator*, not the engine — closed-loop loadgen awaits each POST, so
+offered load caps at `concurrency / latency`. (Phase 1's single-worker knee
+was ~56k/s admission; 8 sharded workers clear 84k/s with headroom left.)
+
+### Hot-shard drill (`--skew 1.5 --keys 8`, `--sink-delay-ms 1`, 40k/s, 12s)
+
+8 keys over 8 shards hash to `{0:0, 1:6, 2:0, 3:2, 4:5, 5:4, 6:1, 7:4}` —
+shards 3 and 7 own no keys (hash luck at tiny key counts). Skew piles
+≈38% of traffic on user 0 and ≈13% on user 2, both on shard 0.
+
+| Run | Accepted/Rejected | Per-shard mean depth (200ms samples) |
+|---|---|---|
+| uniform (`--skew 0`) | 479,784 / 0 | s0 22.2, s1 19.2, s2 20.5, s3 0, s4 22.9, s5 19.5, s6 17.5, s7 0 |
+| skewed (`--skew 1.5`) | 479,760 / 0 | s0 **23.0 (max 66)**, s1 2.2, s2 3.7, s3 0, s4 4.5, s5 2.7, s6 5.1, s7 0 |
+
+### Interpretation
+
+1. **Per-key ordering is structural, not statistical.** The test fails on any
+   cross-shard interleave; it passes because routing is a pure function
+   evaluated once by the single partitioner task. No locks, no sequence
+   numbers on the hot path.
+2. **Modulo routing's hot-key cost is visible in one table.** Skewed load
+   leaves 6 shards near-idle (depth 2–5) while shard 0 holds a 23-deep mean
+   backlog — the same offered rate, 5x the imbalance. The hash disperses
+   *keys* evenly, but Zipf *weight* follows the hottest keys wherever they
+   land. Mitigations (key splitting, consistent hashing) are out of scope
+   (ADR-004, ADR-008); the per-shard gauge is the detector.
+3. **No loss anywhere.** Every drill: accepted == sent, zero 429s, zero
+   errors. Backlog appears only as shard depth, never as drops.
+
+### Phase 4 gate status
+
+- [x] `Partitioner` + deterministic `route()` (src/partitioner.rs), no new crates
+- [x] Round-robin distributor replaced; one consumer per shard; keyless
+      round-robin fallback in the API for future keyless event types
+- [x] Ordering proof under load (`tests/ordering.rs`)
+- [x] `--skew`/`--keys` loadgen flags + per-shard lag in `/metrics` and CSV
+- [x] Hot-shard skew documented above

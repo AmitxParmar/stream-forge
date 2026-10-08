@@ -20,6 +20,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod gateway;
+pub mod partitioner;
 pub mod pipeline;
 pub mod sink;
 pub mod telemetry;

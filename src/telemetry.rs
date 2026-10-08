@@ -17,6 +17,9 @@ struct MetricsInner {
     accepted: std::sync::atomic::AtomicU64,
     rejected_full: std::sync::atomic::AtomicU64,
     rejected_invalid: std::sync::atomic::AtomicU64,
+    /// Per-shard queue depths (Phase 4 partitioning). Resized by
+    /// `init_shards`; lock-free reads/writes afterwards via atomics.
+    shard_depths: std::sync::RwLock<Vec<std::sync::atomic::AtomicUsize>>,
     started: std::time::Instant,
 }
 
@@ -33,6 +36,8 @@ pub struct MetricsSnapshot {
     pub rejected_full: u64,
     /// Events rejected with 422 for failing validation.
     pub rejected_invalid: u64,
+    /// Per-shard queue depths, index = shard id (Phase 4 hot-shard signal).
+    pub shard_depths: Vec<usize>,
     /// Milliseconds since startup.
     pub uptime_ms: u64,
 }
@@ -54,6 +59,7 @@ impl Metrics {
                 accepted: std::sync::atomic::AtomicU64::new(0),
                 rejected_full: std::sync::atomic::AtomicU64::new(0),
                 rejected_invalid: std::sync::atomic::AtomicU64::new(0),
+                shard_depths: std::sync::RwLock::new(Vec::new()),
                 started: std::time::Instant::now(),
             }),
         }
@@ -64,6 +70,37 @@ impl Metrics {
         self.inner
             .depth
             .store(depth, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Size the per-shard depth vector. Called once at worker-group startup;
+    /// later `set_shard_depth` calls for indexes beyond this are ignored.
+    pub fn init_shards(&self, count: usize) {
+        if let Ok(mut depths) = self.inner.shard_depths.write() {
+            depths.resize_with(count, || std::sync::atomic::AtomicUsize::new(0));
+        }
+    }
+
+    /// Publish the queue depth of one shard (hot-shard signal for Phase 4).
+    ///
+    /// Best-effort: indexes beyond the `init_shards` size and poisoned locks
+    /// are silently ignored so metrics can never break the hot path.
+    pub fn set_shard_depth(&self, shard: usize, depth: usize) {
+        if let Ok(depths) = self.inner.shard_depths.read() {
+            if let Some(slot) = depths.get(shard) {
+                slot.store(depth, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Read back one shard's depth (primarily for tests).
+    #[must_use]
+    pub fn shard_depth(&self, shard: usize) -> usize {
+        if let Ok(depths) = self.inner.shard_depths.read() {
+            if let Some(slot) = depths.get(shard) {
+                return slot.load(std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        0
     }
 
     /// Publish the last flushed batch size.
@@ -115,6 +152,14 @@ impl Metrics {
                 .inner
                 .rejected_invalid
                 .load(std::sync::atomic::Ordering::Relaxed),
+            shard_depths: if let Ok(depths) = self.inner.shard_depths.read() {
+                depths
+                    .iter()
+                    .map(|d| d.load(std::sync::atomic::Ordering::Relaxed))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             uptime_ms: u64::try_from(self.inner.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         }
     }
@@ -163,5 +208,19 @@ mod tests {
         let m2 = m.clone();
         m.inc_accepted();
         assert_eq!(m2.snapshot().accepted, 1);
+    }
+
+    #[test]
+    fn per_shard_depths_round_trip() {
+        let m = Metrics::new();
+        assert!(m.snapshot().shard_depths.is_empty());
+        m.init_shards(3);
+        m.set_shard_depth(0, 12);
+        m.set_shard_depth(2, 1024);
+        m.set_shard_depth(9, 7); // out of range: ignored, never panics
+        assert_eq!(m.shard_depth(0), 12);
+        assert_eq!(m.shard_depth(1), 0);
+        assert_eq!(m.shard_depth(2), 1024);
+        assert_eq!(m.snapshot().shard_depths, vec![12, 0, 1024]);
     }
 }

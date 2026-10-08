@@ -37,6 +37,28 @@ struct Args {
     /// CSV file path to append sampled metrics to (requires `--metrics-url`).
     #[arg(long)]
     depth_csv: Option<std::path::PathBuf>,
+
+    /// Size of the user-id key space (`user_id = keygen(seq) % keys`).
+    #[arg(long, default_value_t = 10_000)]
+    keys: u64,
+
+    /// Zipf-ish skew exponent for key selection (Phase 4 hot-shard drill).
+    /// `0` = uniform; larger values concentrate traffic on low user ids
+    /// (`s = 1.5` is the plan's drill point).
+    #[arg(long, default_value_t = 0.0)]
+    skew: f64,
+}
+
+/// Select a user id: uniform over `[0, keys)` at `skew <= 0`, otherwise a
+/// power-law tilt (`u^(1+skew)`) that piles probability onto low ids —
+/// the cheap stand-in for Zipf key popularity behind the hot-shard drill.
+fn pick_user_id(seq: u64, keys: u64, skew: f64) -> u64 {
+    let keys = keys.max(1);
+    if skew <= 0.0 {
+        return seq % keys;
+    }
+    let u: f64 = rand::random();
+    ((keys as f64) * u.powf(1.0 + skew)) as u64 % keys
 }
 
 /// Shared counters across sender tasks.
@@ -65,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     eprintln!(
-        "loadgen: rate={}/s duration={}s target={} concurrency={}",
-        args.rate, args.duration, args.target, args.concurrency
+        "loadgen: rate={}/s duration={}s target={} concurrency={} keys={} skew={}",
+        args.rate, args.duration, args.target, args.concurrency, args.keys, args.skew
     );
 
     let client = reqwest::Client::builder()
@@ -88,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
             use std::io::Write;
             writeln!(
                 file,
-                "t_ms,queue_depth,batch_last,accepted,rejected_full,rejected_invalid,uptime_ms"
+                "t_ms,queue_depth,batch_last,accepted,rejected_full,rejected_invalid,shard_depths,uptime_ms"
             )
             .expect("write csv header");
             let started = Instant::now();
@@ -100,15 +122,22 @@ async fn main() -> anyhow::Result<()> {
                 match sampler.get(&metrics_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         if let Ok(m) = resp.json::<serde_json::Value>().await {
+                            let shards = m["shard_depths"].as_array().map_or(String::new(), |a| {
+                                a.iter()
+                                    .map(|v| v.as_u64().unwrap_or(0).to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("|")
+                            });
                             let _ = writeln!(
                                 file,
-                                "{},{},{},{},{},{},{}",
+                                "{},{},{},{},{},{},{},{}",
                                 started.elapsed().as_millis(),
                                 m["queue_depth"].as_u64().unwrap_or(0),
                                 m["batch_last"].as_u64().unwrap_or(0),
                                 m["accepted"].as_u64().unwrap_or(0),
                                 m["rejected_full"].as_u64().unwrap_or(0),
                                 m["rejected_invalid"].as_u64().unwrap_or(0),
+                                shards,
                                 m["uptime_ms"].as_u64().unwrap_or(0),
                             );
                         }
@@ -145,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 seq += 1;
-                let user_id = seq % 10_000;
+                let user_id = pick_user_id(seq, args.keys, args.skew);
                 let body = serde_json::json!({
                     "eventId": seq,
                     "userId": user_id,
@@ -217,4 +246,44 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("P99 latency:  {p99:.2?}");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uniform_skew_covers_key_space() {
+        let keys = 100;
+        for seq in 0..1_000 {
+            assert_eq!(pick_user_id(seq, keys, 0.0), seq % keys);
+        }
+        // Negative skew also means uniform.
+        assert_eq!(pick_user_id(7, keys, -1.0), 7);
+    }
+
+    #[test]
+    fn skewed_picks_stay_in_range_and_tilt_hot() {
+        let keys = 1_000u64;
+        let mut hot = 0usize;
+        for seq in 0..20_000 {
+            let u = pick_user_id(seq, keys, 1.5);
+            assert!(u < keys, "user {u} out of range");
+            if u < keys / 10 {
+                hot += 1;
+            }
+        }
+        // Skew 1.5 puts P(pick < keys/10) = 0.1^(1/2.5) ~= 0.40 on the
+        // hottest decile — far above uniform's 0.10, far below a majority.
+        assert!(
+            (6_000..12_000).contains(&hot),
+            "expected ~8000/20000 hot-decile picks, got {hot}"
+        );
+    }
+
+    #[test]
+    fn degenerate_key_space_never_divides_by_zero() {
+        assert_eq!(pick_user_id(u64::MAX, 0, 0.0), 0);
+        assert!(pick_user_id(u64::MAX, 0, 1.5) < 1);
+    }
 }
